@@ -12318,7 +12318,8 @@ rb_thread_start_0(fn, arg, th)
     }
 
     /** set new stack pointer **/
-   __asm__ __volatile__ ("movl %0, %%esp\n" : : "r" (th->stk_base));
+   __asm__ __volatile__ ("movl %0, %%esp\n\t"
+			 "subl $12, %%esp\n" : : "r" (th->stk_base));
    return rb_thread_start_2(fn, arg, th);
 }
 
@@ -12333,6 +12334,7 @@ rb_thread_start_2(fn, arg, th)
    struct BLOCK *volatile saved_block = 0;
    enum rb_thread_status status;
    int state;
+   struct FRAME dummy_frame;
 
   if (ruby_block) {		/* should nail down higher blocks */
 	struct BLOCK dummy;
@@ -12342,6 +12344,10 @@ rb_thread_start_2(fn, arg, th)
 	saved_block = ruby_block = dummy.prev;
     }
     scope_dup(ruby_scope);
+
+    dummy_frame.prev = ruby_frame;
+    frame_dup(&dummy_frame);
+    ruby_frame = dummy_frame.prev;
 
     if (!th->next) {
 	/* merge in thread list */
