@@ -170,7 +170,7 @@ require 'monitor'
 
 class Logger
   VERSION = "1.2.6"
-  id, name, rev = %w$Id logger.rb 1234$
+  id, name, rev = %w$Id$
   ProgName = "#{name.chomp(",v")}/#{rev}"
 
   class Error < RuntimeError; end
