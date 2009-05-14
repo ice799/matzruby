@@ -466,12 +466,12 @@ stack_end_address(VALUE **stack_end_p)
 # define STACK_END (stack_end)
 #endif
 #if STACK_GROW_DIRECTION < 0
-# define STACK_LENGTH  (rb_gc_stack_start - STACK_END)
+# define STACK_LENGTH(start)  ((start) - STACK_END)
 #elif STACK_GROW_DIRECTION > 0
-# define STACK_LENGTH  (STACK_END - rb_gc_stack_start + 1)
+# define STACK_LENGTH(start)  (STACK_END - (start) + 1)
 #else
-# define STACK_LENGTH  ((STACK_END < rb_gc_stack_start) ? rb_gc_stack_start - STACK_END\
-                                           : STACK_END - rb_gc_stack_start + 1)
+# define STACK_LENGTH(start)  ((STACK_END < (start)) ? (start) - STACK_END\
+                                           : STACK_END - (start) + 1)
 #endif
 #if STACK_GROW_DIRECTION > 0
 # define STACK_UPPER(x, a, b) a
@@ -494,27 +494,36 @@ stack_grow_direction(addr)
 
 #define GC_WATER_MARK 512
 
-#define CHECK_STACK(ret) do {\
+#define CHECK_STACK(ret, start) do {\
     SET_STACK_END;\
-    (ret) = (STACK_LENGTH > STACK_LEVEL_MAX + GC_WATER_MARK);\
+    (ret) = (STACK_LENGTH(start) > STACK_LEVEL_MAX + GC_WATER_MARK);\
 } while (0)
 
 size_t
 ruby_stack_length(p)
     VALUE **p;
 {
-    SET_STACK_END;
-    if (p) *p = STACK_UPPER(STACK_END, rb_gc_stack_start, STACK_END);
-    return STACK_LENGTH;
+  SET_STACK_END;
+  VALUE *start;
+  if (rb_curr_thread == rb_main_thread) {
+    start = rb_gc_stack_start;
+  } else {
+    start = rb_curr_thread->stk_base;
+  }
+  if (p) *p = STACK_UPPER(STACK_END, start, STACK_END);
+  return STACK_LENGTH(start);
 }
 
 int
 ruby_stack_check()
 {
-    int ret;
-
-    CHECK_STACK(ret);
-    return ret;
+  int ret;
+  if (rb_curr_thread == rb_main_thread) {
+    CHECK_STACK(ret, rb_gc_stack_start);
+  } else {
+    CHECK_STACK(ret, rb_curr_thread->stk_base);
+  }
+  return ret;
 }
 
 #define MARK_STACK_MAX 1024
@@ -1404,10 +1413,13 @@ garbage_collect()
 
     init_mark_stack();
 
-    gc_mark((VALUE)ruby_current_node, 0);
-
     /* mark frame stack */
-    for (frame = ruby_frame; frame; frame = frame->prev) {
+    if (rb_curr_thread == rb_main_thread)
+      frame = ruby_frame;
+    else
+      frame = rb_main_thread->frame;
+
+    for (; frame; frame = frame->prev) {
 	rb_gc_mark_frame(frame);
 	if (frame->tmp) {
 	    struct FRAME *tmp = frame->tmp;
@@ -1417,16 +1429,35 @@ garbage_collect()
 	    }
 	}
     }
-    gc_mark((VALUE)ruby_scope, 0);
-    gc_mark((VALUE)ruby_dyna_vars, 0);
+
+    if (rb_curr_thread == rb_main_thread) {
+      gc_mark((VALUE)ruby_current_node, 0);
+      gc_mark((VALUE)ruby_scope, 0);
+      gc_mark((VALUE)ruby_dyna_vars, 0);
+    } else {
+      gc_mark((VALUE)rb_main_thread->node, 0);
+      gc_mark((VALUE)rb_main_thread->scope, 0);
+      gc_mark((VALUE)rb_main_thread->dyna_vars, 0);
+
+      /* scan the current thread's stack */
+      rb_gc_mark_locations((VALUE*)STACK_END, rb_curr_thread->stk_base);
+    }
+
     if (finalizer_table) {
-	mark_tbl(finalizer_table, 0);
+      mark_tbl(finalizer_table, 0);
     }
 
     FLUSH_REGISTER_WINDOWS;
     /* This assumes that all registers are saved into the jmp_buf (and stack) */
     setjmp(save_regs_gc_mark);
     mark_locations_array((VALUE*)save_regs_gc_mark, sizeof(save_regs_gc_mark) / sizeof(VALUE *));
+
+    /* If this is not the main thread, we need to scan the C stack, so
+     * set STACK_END to the end of the C stack.
+     */
+    if (rb_curr_thread != rb_main_thread)
+      STACK_END = rb_main_thread->stk_pos;
+
 #if STACK_GROW_DIRECTION < 0
     rb_gc_mark_locations((VALUE*)STACK_END, rb_gc_stack_start);
 #elif STACK_GROW_DIRECTION > 0
@@ -1446,6 +1477,7 @@ garbage_collect()
     rb_gc_mark_locations((VALUE*)((char*)STACK_END + 2),
 			 (VALUE*)((char*)rb_gc_stack_start + 2));
 #endif
+
     rb_gc_mark_threads();
 
     /* mark protected global variables */
